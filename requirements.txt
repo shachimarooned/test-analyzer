@@ -1,0 +1,7 @@
+streamlit
+nltk
+textblob
+scikit-learn
+svgwrite
+pyspellchecker
+numpy
