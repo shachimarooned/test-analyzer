@@ -1,7 +1,43 @@
 import streamlit as st
 import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize, sent_tokenize
+import ssl
+import os
+
+# Fix SSL certificate issue and download NLTK data
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+
+# Download all required NLTK data at startup
+@st.cache_resource
+def download_nltk_data():
+    """Download all required NLTK data"""
+    try:
+        # Create nltk_data directory if it doesn't exist
+        nltk_data_dir = os.path.join(os.path.expanduser("~"), "nltk_data")
+        if not os.path.exists(nltk_data_dir):
+            os.makedirs(nltk_data_dir)
+        
+        # Download required packages
+        packages = ['punkt', 'stopwords', 'averaged_perceptron_tagger', 'brown', 'wordnet']
+        for package in packages:
+            try:
+                nltk.download(package, quiet=True)
+            except:
+                pass
+        
+        return True
+    except Exception as e:
+        st.error(f"Error downloading NLTK data: {e}")
+        return False
+
+# Initialize NLTK downloads
+download_nltk_data()
+
+# Now import the rest
 from collections import Counter
 from textblob import TextBlob
 import svgwrite
@@ -11,18 +47,14 @@ from spellchecker import SpellChecker
 import math
 import base64
 
-# Download NLTK data
-@st.cache_resource
-def download_nltk_data():
-    try:
-        nltk.download('punkt', quiet=True)
-        nltk.download('stopwords', quiet=True)
-        nltk.download('averaged_perceptron_tagger', quiet=True)
-        nltk.download('brown', quiet=True)
-    except:
-        pass
-
-download_nltk_data()
+# Import NLTK modules after download
+try:
+    from nltk.corpus import stopwords
+    from nltk.tokenize import word_tokenize, sent_tokenize
+    NLTK_AVAILABLE = True
+except:
+    NLTK_AVAILABLE = False
+    st.warning("NLTK modules not fully loaded. Some features may be limited.")
 
 class AdvancedTextAnalyzer:
     def __init__(self):
@@ -30,7 +62,8 @@ class AdvancedTextAnalyzer:
         try:
             self.stop_words = set(stopwords.words('english'))
         except:
-            self.stop_words = set()
+            # Fallback stop words if NLTK fails
+            self.stop_words = {'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but', 'in', 'with', 'to', 'for', 'of', 'as', 'by', 'that', 'this', 'it', 'from', 'be', 'are', 'been', 'was', 'were', 'been'}
         
     def correct_spelling(self, text):
         """Correct spelling errors in the text"""
@@ -41,38 +74,68 @@ class AdvancedTextAnalyzer:
         except:
             return text
     
+    def tokenize_words(self, text):
+        """Tokenize words with fallback"""
+        try:
+            return word_tokenize(text.lower())
+        except:
+            # Simple fallback tokenization
+            import re
+            return re.findall(r'\b\w+\b', text.lower())
+    
+    def tokenize_sentences(self, text):
+        """Tokenize sentences with fallback"""
+        try:
+            return sent_tokenize(text)
+        except:
+            # Simple fallback sentence splitting
+            import re
+            sentences = re.split(r'[.!?]+', text)
+            return [s.strip() for s in sentences if s.strip()]
+    
     def extract_key_concepts(self, text, num_concepts=10):
         """Extract key concepts using TF-IDF and other metrics"""
         try:
             # Tokenize and clean
-            words = word_tokenize(text.lower())
+            words = self.tokenize_words(text)
             words = [word for word in words if word.isalpha() and word not in self.stop_words]
+            
+            if not words:
+                return []
             
             # Get word frequencies
             word_freq = Counter(words)
             
             # Extract noun phrases
-            blob = TextBlob(text)
-            noun_phrases = [str(phrase) for phrase in blob.noun_phrases]
+            try:
+                blob = TextBlob(text)
+                noun_phrases = [str(phrase) for phrase in blob.noun_phrases]
+            except:
+                noun_phrases = []
             
             # Calculate TF-IDF for sentences
-            sentences = sent_tokenize(text)
+            sentences = self.tokenize_sentences(text)
+            tfidf_keywords = []
+            
             if len(sentences) > 1:
-                vectorizer = TfidfVectorizer(stop_words='english', max_features=num_concepts)
-                tfidf_matrix = vectorizer.fit_transform(sentences)
-                feature_names = vectorizer.get_feature_names_out()
-                
-                # Get average TF-IDF scores
-                avg_scores = np.mean(tfidf_matrix.toarray(), axis=0)
-                top_indices = avg_scores.argsort()[-num_concepts:][::-1]
-                tfidf_keywords = [feature_names[i] for i in top_indices]
-            else:
-                tfidf_keywords = []
+                try:
+                    vectorizer = TfidfVectorizer(stop_words='english', max_features=num_concepts)
+                    tfidf_matrix = vectorizer.fit_transform(sentences)
+                    feature_names = vectorizer.get_feature_names_out()
+                    
+                    # Get average TF-IDF scores
+                    avg_scores = np.mean(tfidf_matrix.toarray(), axis=0)
+                    top_indices = avg_scores.argsort()[-num_concepts:][::-1]
+                    tfidf_keywords = [feature_names[i] for i in top_indices]
+                except:
+                    pass
             
             # Combine different metrics
             all_keywords = list(word_freq.most_common(num_concepts))
-            all_keywords.extend([(phrase, 1) for phrase in noun_phrases[:5]])
-            all_keywords.extend([(word, 1) for word in tfidf_keywords])
+            if noun_phrases:
+                all_keywords.extend([(phrase, 1) for phrase in noun_phrases[:5]])
+            if tfidf_keywords:
+                all_keywords.extend([(word, 1) for word in tfidf_keywords])
             
             # Remove duplicates and return top concepts
             seen = set()
@@ -84,10 +147,12 @@ class AdvancedTextAnalyzer:
                     if len(final_concepts) >= num_concepts:
                         break
             
-            return final_concepts
+            return final_concepts if final_concepts else [("analysis", 1), ("text", 1)]
+            
         except Exception as e:
             st.error(f"Error in concept extraction: {e}")
-            return []
+            # Return some default concepts
+            return [("analysis", 1), ("text", 1)]
     
     def calculate_sentiment(self, text):
         """Calculate sentiment polarity and subjectivity"""
@@ -100,18 +165,25 @@ class AdvancedTextAnalyzer:
     def extract_summary_points(self, text, num_points=3):
         """Extract key summary points from the text"""
         try:
-            sentences = sent_tokenize(text)
+            sentences = self.tokenize_sentences(text)
+            if not sentences:
+                return ["No summary available."]
+                
             if len(sentences) <= num_points:
                 return sentences
             
             # Score sentences based on word frequency
-            word_freq = Counter(word_tokenize(text.lower()))
+            words = self.tokenize_words(text)
+            word_freq = Counter(words)
             sentence_scores = {}
             
             for sentence in sentences:
-                words = word_tokenize(sentence.lower())
-                score = sum(word_freq[word] for word in words if word in word_freq)
-                sentence_scores[sentence] = score / len(words) if words else 0
+                sentence_words = self.tokenize_words(sentence)
+                if sentence_words:
+                    score = sum(word_freq.get(word, 0) for word in sentence_words)
+                    sentence_scores[sentence] = score / len(sentence_words)
+                else:
+                    sentence_scores[sentence] = 0
             
             # Get top sentences
             top_sentences = sorted(sentence_scores.items(), key=lambda x: x[1], reverse=True)
@@ -277,6 +349,31 @@ class SVGVisualizer:
             
             dwg.add(takeaway_group)
         
+        # Add statistics
+        stats = analysis_results.get('statistics', {})
+        if stats:
+            stats_group = dwg.g()
+            stats_x = self.width - 250
+            stats_y = 80
+            
+            stats_rect = dwg.rect((stats_x, stats_y), (200, 120), 
+                                rx=5, ry=5, fill='#e8f5e9', opacity=0.8)
+            stats_group.add(stats_rect)
+            
+            stats_group.add(dwg.text('Statistics', 
+                                   insert=(stats_x + 100, stats_y + 25),
+                                   text_anchor='middle',
+                                   style='font-size:16px; font-weight:bold; fill:#2c3e50; font-family:Arial'))
+            
+            y_offset = stats_y + 50
+            for key, value in stats.items():
+                stats_group.add(dwg.text(f'{key}: {value}', 
+                                       insert=(stats_x + 10, y_offset),
+                                       style='font-size:12px; fill:#424242; font-family:Arial'))
+                y_offset += 20
+            
+            dwg.add(stats_group)
+        
         dwg.save()
         return filename
 
@@ -294,9 +391,12 @@ def analyze_text(text, title="Text Analysis"):
     summary = analyzer.extract_summary_points(corrected_text, num_points=3)
     
     # Calculate statistics
-    word_count = len(word_tokenize(corrected_text))
-    sentence_count = len(sent_tokenize(corrected_text))
-    avg_word_length = sum(len(word) for word in word_tokenize(corrected_text)) / word_count if word_count > 0 else 0
+    words = analyzer.tokenize_words(corrected_text)
+    sentences = analyzer.tokenize_sentences(corrected_text)
+    
+    word_count = len(words)
+    sentence_count = len(sentences)
+    avg_word_length = sum(len(word) for word in words) / word_count if word_count > 0 else 0
     
     # Prepare results
     analysis_results = {
@@ -419,8 +519,11 @@ if analyze_button and text_input:
             
             # Top concepts
             st.subheader("🎯 Top Concepts")
-            concepts_text = ", ".join([f"**{concept}** ({score:.0f})" for concept, score in results['concepts'][:5]])
-            st.markdown(concepts_text)
+            if results['concepts']:
+                concepts_text = ", ".join([f"**{concept}** ({score:.0f})" for concept, score in results['concepts'][:5]])
+                st.markdown(concepts_text)
+            else:
+                st.info("No key concepts extracted. Try a longer text.")
             
             # Key takeaways
             st.subheader("💡 Key Takeaways")
